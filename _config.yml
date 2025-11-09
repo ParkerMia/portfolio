@@ -3,3 +3,8 @@ description: "Data Science Portfolio for Grad School"
 theme: jekyll-theme-minimal
 baseurl: "" # leave empty if publishing at username.github.io
 url: ""     # leave empty for GitHub Pages
+
+nav:
+  - Home: index.md
+  - About: about.md
+  - Projects: projects.md
