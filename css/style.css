@@ -63,13 +63,15 @@ body {
   border-radius: 50%;
   object-fit: cover;
   border: 4px solid black;
-  margin: 20px 0;
-  display: inline-block; /* override block centering */
-  float: left;           /* pin it left */
+
+  float: left;                 /* keep it on the left */
+  margin: 10px 36px 20px 40px; /* top | right | bottom | left */
+  display: inline-block;
 }
 
-.bio-text {
-  float: left;
-  width: calc(100% - 270px); /* make room for the image */
+/* keep floats from leaking into later sections */
+.content::after {
+  content: "";
+  display: block;
+  clear: both;
 }
-
