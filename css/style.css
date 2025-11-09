@@ -63,6 +63,8 @@ body {
   border-radius: 50%;
   object-fit: cover;
   border: 4px solid black;
-  display: block;
-  margin: 20px 0; /* removed auto centering */
+  margin: 20px 0;
+  display: inline-block; /* override block centering */
+  float: left;           /* pin it left */
 }
+
