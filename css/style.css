@@ -57,4 +57,12 @@ body {
     border-radius: 8px;
 }
 
-
+.profile-pic {
+  width: 250px;           /* adjust size if needed */
+  height: 250px;
+  object-fit: cover;      /* crops to fill the circle */
+  border-radius: 50%;     /* makes it circular */
+  border: 4px solid black;
+  display: block;
+  margin: 0 auto;         /* centers the image */
+}
