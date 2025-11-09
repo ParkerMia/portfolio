@@ -1,3 +1,5 @@
-title: Mia Parker
-description: text can go here
+title: "Mia's Portfolio"
+description: "Data Science Portfolio for Grad School"
 theme: jekyll-theme-minimal
+baseurl: "" # leave empty if publishing at username.github.io
+url: ""     # leave empty for GitHub Pages
