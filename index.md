@@ -7,3 +7,4 @@ title: Home
 Data Science Enthusiast | Grad School Applicant  
 
 Check out my **[Projects](projects.md)**.
+
