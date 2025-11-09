@@ -68,3 +68,8 @@ body {
   float: left;           /* pin it left */
 }
 
+.bio-text {
+  float: left;
+  width: calc(100% - 270px); /* make room for the image */
+}
+
