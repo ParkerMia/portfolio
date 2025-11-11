@@ -1,0 +1,714 @@
+---
+title: "DATA252 - KNN, Trees, and Bagging on US Accidents"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(GGally)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(ipred)
+library(readr)
+library(class)
+library(bestglm)
+
+```
+
+## Load and Prepare Data
+
+```{r}
+US_Accidents <- read_csv("US_Accidents_March23_sampled_500k.csv") %>%
+  drop_na()
+```
+
+## Other Datasets
+
+# US cities
+```{r}
+uscities <- read_csv("uscities.csv")
+```
+```{r}
+length(unique(uscities$city))
+```
+
+```{r}
+uscities <- uscities%>%
+  mutate(City=city) %>%
+  mutate(State=state_id)
+
+US_Accidents <- US_Accidents %>%
+  left_join(
+    uscities %>%
+    select(City, State, population, density),
+    by = c("City", "State"))%>%
+  drop_na()%>%
+  filter(population != 0)
+```
+```{r}
+sum(is.na(US_Accidents))
+
+```
+
+
+```{r}
+accidentsNorm <- data.frame(scale(US_Accidents[ , c(10, 21, 22, 23, 24, 25, 27, 28, 47, 48)]), Outcome=US_Accidents$Severity)%>%
+  drop_na()
+
+summary(accidentsNorm)
+```
+
+
+## EDA
+
+### Distribution of Severity
+```{r}
+ggplot(US_Accidents, aes(Severity))+
+  geom_histogram(fill='#a8c85f')
+```
+### GGPairs
+
+```{r, tidy=TRUE, message=F}
+ggpairs(US_Accidents, columns = c(3, 21, 22, 23, 47, 48), 
+        lower = list(continuous = wrap("points", color = "#5badfbff", alpha = 0.3)),
+        diag = list(continuous = wrap("densityDiag", fill = "#5badfbff", alpha = 0.3)))
+```
+
+### Accidents Per Month
+
+```{r}
+US_Accidents$Start_Time <- as.POSIXct(US_Accidents$Start_Time)
+
+daily_counts <- US_Accidents %>%
+  mutate(date = as.Date(Start_Time)) %>%
+  count(date)
+
+monthly_avg <- daily_counts %>%
+  mutate(year_month = format(date, "%Y-%m")) %>%
+  group_by(year_month) %>%
+  summarise(avg_accidents = mean(n)) %>%
+  ungroup()
+
+ggplot(monthly_avg, aes(x = as.Date(paste0(year_month, "-01")), y = avg_accidents)) +
+  geom_line(color = "#ee5b61", linewidth = 1.2) +
+  labs(
+    title = "Average Daily Accidents per Month",
+    x = "Month",
+    y = "Average Daily Count"
+  ) 
+```
+
+### Accidents throughout the day
+
+```{r}
+
+US_Accidents %>%
+  mutate(hour = lubridate::hour(Start_Time)) %>%
+  ggplot(aes(x = hour)) +
+  geom_histogram(binwidth = 1, position = "dodge", fill= '#ffe034', color='black') +
+  labs(title = "Accidents by Hour", x = "Hour", y = "Count")
+```
+
+### Accidents city Distrubution
+
+```{r}
+counts <- table(US_Accidents$City)
+
+most_common_city <- names(sort(counts, decreasing = TRUE))[1:5]
+most_common_city
+
+US_Accidents %>%
+  filter(City %in% c('Miami', 'Los Angeles', 'Orlando', 'Dallas', 'Houston'))%>%
+  ggplot(aes(x=City))+
+  geom_bar(fill='#98c8f9', color='black')
+```
+
+
+### Accidents in Miami
+
+```{r}
+Miami <- US_Accidents %>%
+  filter(City== 'Miami') %>%
+  filter(State == 'FL')
+
+library(leaflet)
+severity_colors <- colorFactor(
+  palette = c("#98c8f9", "#a8c85f", "#ffe034", "#ee5b61"),
+  domain = c(1, 2, 3, 4))
+
+
+leaflet(data = Miami) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    ~Start_Lng, ~Start_Lat,
+    radius = ~case_when(
+      Severity == 1 ~ 4,
+      Severity == 2 ~ 2,
+      Severity == 3 ~ 4,
+      Severity == 4 ~ 4),
+    color = ~severity_colors(Severity),
+    stroke = FALSE,
+    fillOpacity = ~case_when(
+  Severity == 1 ~ 1.0,
+  Severity == 2 ~ 0.4,
+  Severity == 3 ~ 1.0,
+  Severity == 4 ~ 1.0
+)
+  ) %>%
+   addLegend("bottomright", pal = severity_colors, values = ~Severity,
+            title = "Severity Level",
+            opacity = 1)
+
+
+```
+
+
+
+## Milestone 1: KNN
+
+### Step 1: Stratifying and Sampling the Data
+
+```{r}
+set.seed(1)
+accidents1<-accidentsNorm%>%
+  filter(Outcome==1)
+dim(accidents1)
+
+accidents2<-accidentsNorm%>%
+  filter(Outcome==2)%>%
+  sample_n(size = 7500, replace = FALSE)
+dim(accidents2)
+
+accidents3<-accidentsNorm%>%
+  filter(Outcome==3)
+dim(accidents3)
+
+accidents4<-accidentsNorm%>%
+  filter(Outcome==4)
+dim(accidents4)
+
+## TRAINING INDICES 
+sample1<-sample(1:1499, 1499*.7)
+sample2<-sample(1:7500, 7500*.7)
+sample3<-sample(1:3971, 3971*.7)
+sample4<-sample(1:6255, 6255*.7)
+
+## TRAINING AND TESTING SETS SAMPLED PROPORTIONALLY FROM EACH
+trainStrat<-rbind(accidents1[sample1, ],
+                  accidents2[sample2, ],
+                  accidents3[sample3, ],
+                  accidents4[sample4, ])
+
+testStrat<-rbind(accidents1[-sample1, ],
+                  accidents2[-sample2, ],
+                  accidents3[-sample3, ],
+                  accidents4[-sample4, ])
+
+## PROPORITON OF OUTCOME
+mean(trainStrat$Outcome)
+mean(testStrat$Outcome)
+```
+
+
+### Step 2: Section Training and Testing Data
+
+```{r}
+set.seed(1)
+trainFea<-trainStrat%>%
+  select(-Outcome)
+dim(trainFea)
+
+testFea<-testStrat%>%
+  select(-Outcome)
+
+trainOut<-trainStrat$Outcome
+testOut<-testStrat$Outcome
+```
+```{r}
+sum(is.na(trainFea))
+sum(is.na(testFea))
+sum(is.na(trainOut))
+```
+
+### Step 3: Train Model and Create Table
+
+```{r}
+set.seed(1)
+
+knn.pred=knn(train = trainFea,
+             test = testFea,
+             cl = trainOut,
+             k=1)
+
+```
+
+```{r}
+cm<-table(knn.pred,testOut)
+cm
+mean(knn.pred==testOut)
+```
+
+### Step 4: Find Best Neighborhood Size
+
+```{r}
+set.seed(123)
+accuracy <- rep(0,30)
+for (i in 1:30){
+  knnAccidents<- knn(train = trainFea,
+                test = testFea,
+                cl = trainOut, 
+                k = i)
+  accuracy[i] = mean(knnAccidents==testOut)
+}
+
+ggplot(data = data.frame(accuracy), aes(x = 1:30, y = accuracy)) +
+  geom_line(color = "#5badfbff")+
+  xlab("Neighborhood Size") + 
+  ylab ("Accuracy")
+
+which.max(accuracy)
+
+## best pred...
+knn.pred12=knn(train = trainFea,
+              test = testFea,
+              cl = trainOut,
+              k=23)
+
+#Confusion matrix
+cm12<-table(knn.pred12,testOut)
+
+mean(knn.pred12==testOut)
+```
+
+### Step 5: Create Table with best Neighborhood
+
+```{r}
+set.seed(123)
+knn.pred=knn(train = trainFea,
+             test = testFea,
+             cl = trainOut,
+             k=26)
+cm<-table(knn.pred,testOut)
+mean(knnAccidents==testOut)
+cm
+```
+
+
+
+## Milestone 2: Classification Tree
+
+
+### Step 1: Organize Data
+
+```{r}
+accidents2 <- accidentsNorm %>% filter(Outcome == 2) %>% sample_n(7500)
+accidentsBalanced <- accidentsNorm %>% filter(Outcome != 2) %>% rbind(accidents2)
+
+set.seed(10)
+trainIndex <- createDataPartition(accidentsBalanced$Outcome, p = 0.7, list = FALSE)
+trainSet <- accidentsBalanced[trainIndex, ]
+testSet <- accidentsBalanced[-trainIndex, ]
+```
+
+### Step 2: Classification Tree
+
+```{r}
+set.seed(10)
+classTree <- rpart(Outcome ~ ., data = trainSet, method = "class")
+custom_colors <- c("#98c8f9", "#a8c85f", "#ffe034", "#ee5b61")
+class_labels <- levels(classTree$frame$yval)
+color_map <- setNames(custom_colors, class_labels)
+
+rpart.plot(classTree, box.col = color_map[classTree$frame$yval], legend.cex = 0.7)
+
+plotcp(classTree)
+printcp(classTree)
+
+minCP <- classTree$cptable[which.min(classTree$cptable[,"xerror"]), "CP"]
+```
+
+### Step 3: Prune the Tree
+
+```{r}
+prune_classTree <- prune(classTree, cp = minCP)
+rpart.plot(prune_classTree)
+```
+
+### Step 4: Predict and Evaluate
+
+```{r}
+# Unpruned Tree
+predTree1 <- predict(classTree, testSet, type = "class")
+cmTree1 <- table(testSet$Outcome, predTree1)
+cmTree1
+mean(predTree1 == testSet$Outcome)
+
+# Pruned Tree
+predTree2 <- predict(prune_classTree, testSet, type = "class")
+cmTree2 <- table(testSet$Outcome, predTree2)
+cmTree2
+mean(predTree2 == testSet$Outcome)
+```
+
+### Step 5: Bagging (ipred)
+
+```{r}
+set.seed(252)
+pimaBag <- bagging(Outcome ~ ., 
+                   data = trainSet,
+                   nbagg = 150,
+                   coob = TRUE,
+                   control = rpart.control(minsplit = 2, cp = 0))
+
+predBag <- predict(pimaBag, testSet, type = "class")
+cmBag <- table(testSet$Outcome, predBag)
+cmBag
+mean(predBag == testSet$Outcome)
+```
+
+### Step 6: Bagging (caret)
+
+```{r}
+set.seed(10)
+caretBag <- train(Outcome ~ ., 
+                  data = trainSet, 
+                  method = "treebag",
+                  trControl = trainControl("cv", number = 10),
+                  importance = TRUE)
+
+predCaretBag <- predict(caretBag, testSet)
+table(testSet$Outcome, predCaretBag)
+mean(predCaretBag == testSet$Outcome)
+```
+
+```{r}
+library(vip)
+vip(caretBag, geom = "col", aesthetics = list(fill = "#98c8f9"))
+```
+
+
+## Milestone 3
+
+```{r}
+M3 <- US_Accidents %>%
+  mutate(SeverityBinary = case_when(
+    Severity < 3 ~ "Mild", 
+    Severity >= 3 ~ "Severe"
+  )) %>% 
+  filter(!is.na(SeverityBinary)) %>%
+  mutate(SeverityBinary = factor(SeverityBinary))
+
+M3 <- M3 %>%
+  mutate(SeverityBinary = ifelse(SeverityBinary == "Severe", 1, 0))
+
+head(M3)
+```
+
+
+
+```{r}
+# Split the data into training and test set
+set.seed(1)
+
+accidents2 <- US_Accidents %>% filter(Severity == 2) %>% sample_n(7500)
+accidentsBalanced <- US_Accidents %>% filter(Severity != 2) %>% rbind(accidents2)
+
+
+M3 <- accidentsBalanced %>%
+  mutate(SeverityBinary = case_when(
+    Severity < 3 ~ "Mild", 
+    Severity >= 3 ~ "Severe"
+  )) %>% 
+  filter(!is.na(SeverityBinary)) %>%
+  mutate(SeverityBinary = factor(SeverityBinary))
+
+M3 <- M3 %>%
+  mutate(SeverityBinary = ifelse(SeverityBinary == "Severe", 1, 0))
+
+set.seed(314)
+caretSamp <- createDataPartition(M3$SeverityBinary , 
+                                        p = 0.7, 
+                                        list = FALSE)
+
+## SPLIT TESTING AND TRAINING
+trainCaret  <- M3[caretSamp, ]
+testCaret <- M3[-caretSamp, ]
+
+```
+
+```{r}
+
+trainCaret
+
+```
+
+
+
+```{r}
+
+ggplot(data=trainCaret, aes(x=`population`, y=SeverityBinary))+
+  geom_point(color="#a8c85f")+
+  geom_smooth(method="lm", se=FALSE, color='#98c8f9')
+
+```
+
+```{r}
+
+modSimp <- glm(SeverityBinary ~ `population`, data = trainCaret, family = "binomial")
+summary(modSimp)
+
+```
+
+```{r}
+
+ggplot(data=trainCaret, aes(x=`population`, y=SeverityBinary))+
+  geom_point(color="#a8c85f")+
+  geom_line(aes(x = `population`, y = modSimp$fitted), color='#98c8f9')
+
+```
+
+
+```{r}
+
+# slope
+slope<-modSimp$coefficients[2]
+slope
+
+```
+
+```{r}
+
+
+
+x <- seq(-4, 4, by = 0.1)
+showLinks <- data.frame(
+  x = c(x, x),
+  link = c(pnorm(x), plogis(x, scale = sqrt(3)/pi)),
+  Function = c(rep("Normal", length(x)), rep("Logistic", length(x)))
+)
+
+ggplot(showLinks, aes(x = x, y = link, color = Function)) +
+  geom_path(data = showLinks[1:81,]) +
+  geom_path(data = showLinks[82:162,]) +
+  scale_color_manual(values = c("Normal" = "#98c8f9", "Logistic" = "#ee5b61"))
+
+```
+
+
+```{r}
+# exponentiate
+exp(slope)
+```
+
+```{r}
+# PREDICT (DEFAULT)
+pred1<-predict(modSimp, newdata = testCaret)
+head(pred1)
+```
+
+```{r}
+# PREDICT (Response)
+pred1R<-predict(modSimp, newdata = testCaret, type="response")
+head(pred1R)
+
+```
+
+```{r}
+## CONFUSION MATRIX
+conf_mat1<-data.frame(testOutcome=testCaret$SeverityBinary, predOut=pred1R>.5)
+table(conf_mat1$predOut, conf_mat1$testOutcome)
+
+## CORRECT RATE
+mean(conf_mat1$predOut==conf_mat1$testOutcome)
+```
+
+```{r}
+## CONFUSION MATRIX
+conf_mat2<-data.frame(testOutcome=testCaret$SeverityBinary, predOut=pred1R>.3)
+table(conf_mat2$predOut, conf_mat2$testOutcome)
+
+## CORRECT RATE
+mean(conf_mat2$predOut==conf_mat2$testOutcome)
+```
+
+```{r message=FALSE, warning=FALSE}
+
+M3_clean <- M3 %>%
+  select(SeverityBinary, `Temperature(F)`, `Humidity(%)`, `Wind_Chill(F)`, `Wind_Speed(mph)`)
+
+M3_clean$SeverityBinary<-as.factor(M3_clean$SeverityBinary)
+
+
+
+ggpairs(
+  M3_clean,
+  ggplot2::aes(color = factor(SeverityBinary), fill = factor(SeverityBinary)),
+  lower = list(continuous = wrap("points", alpha = 0.5)),
+  diag = list(continuous = wrap("densityDiag", bins = 10, alpha = 0.5)),
+  upper = list(continuous = wrap("cor", size = 3))) +
+  scale_color_manual(values = c("0" = "#5ba3e0", "1" = '#c4373d')) +
+  scale_fill_manual(values = c("0" = "#98c8f9", "1" = "#ee5b61"))
+
+```
+
+
+
+
+```{r}
+clean_tc <- trainCaret %>%
+  select(SeverityBinary, `Humidity(%)`, `Temperature(F)`, `Wind_Speed(mph)`, `Distance(mi)`, `Wind_Chill(F)`, `population`, `density`)
+
+
+modMulti<-glm(SeverityBinary ~.,
+          data = clean_tc, family = "binomial")
+
+summary(modMulti)
+```
+
+```{r}
+
+sapply(trainCaret, function(x) length(unique(x))) %>% sort()
+
+```
+
+
+
+```{r}
+## Backward
+step(modMulti)
+
+## NULL MODEL
+mod0 <- glm(SeverityBinary ~ 1, family = binomial, data = trainCaret)
+
+## FORWARD Selection
+step(mod0, scope = list(upper = modMulti, lower = mod0), 
+     method = "forward")
+
+```
+
+```{r}
+# the Xy matrix needs y as the right-most variable
+# this one already has Outcome at the last column
+
+trainCaret <- trainCaret %>%
+  select(`Temperature(F)`, `Humidity(%)`, `Wind_Chill(F)`, `Wind_Speed(mph)`, `Distance(mi)`, `population`, `density`, SeverityBinary)
+
+best.Xy <- data.frame(trainCaret)
+table(best.Xy$SeverityBinary)
+
+str(best.Xy)
+summary(best.Xy$SeverityBinary)
+
+
+# Run best subset
+bglm.AIC = bestglm(Xy = best.Xy, family = binomial, IC = "AIC", 
+                   TopModels = 10)
+bglm.AIC$BestModels
+
+
+```
+
+```{r}
+
+## BEST MODEL INCLUDES:
+## Pregnancies+Glucose+BloodPressure+Insulin+BMI+DiabetesPedigreeFunction+Age
+modBest<-glm(SeverityBinary ~`Temperature(F)`+`Humidity(%)`+`Wind_Chill(F)`+`Wind_Speed(mph)`+`Distance(mi)` +`population` + `density`,
+          data = trainCaret, family = "binomial")
+
+summary(modBest)
+
+```
+
+```{r}
+## Predict
+predBest<-predict(modBest, newdata = testCaret, type="response")
+```
+
+
+```{r}
+## Threshold
+conf_matBest<-data.frame(testOutcome=testCaret$SeverityBinary, predOut=predBest>.5)
+
+## Confusion Matrix
+table(conf_matBest$predOut, conf_matBest$testOutcome)
+
+## CORRECT RATE
+mean(conf_matBest$predOut==conf_matBest$testOutcome)
+```
+
+```{r}
+## Confusion Matrix
+table(conf_mat1$predOut, conf_mat1$testOutcome)
+
+## CORRECT RATE
+mean(conf_mat1$predOut==conf_mat1$testOutcome)
+```
+
+```{r}
+## Confusion Matrix
+table(conf_matBest$predOut, conf_matBest$testOutcome)
+
+## CORRECT RATE
+mean(conf_matBest$predOut==conf_matBest$testOutcome)
+```
+```{r}
+
+testCaret <- testCaret %>%
+  select(`Temperature(F)`, `Humidity(%)`, `Wind_Chill(F)`, `Wind_Speed(mph)`, `Distance(mi)`, `population`, `density`, SeverityBinary)
+str(testCaret)
+str(trainCaret)
+
+
+
+
+```
+
+
+
+
+```{r echo=FALSE}
+## need train, test, cl, and k
+trainFea<-trainCaret%>%
+  select(-SeverityBinary)
+
+testFea<-testCaret%>%
+  select(-SeverityBinary)
+
+trainOut<-trainCaret$SeverityBinary
+testOut<-testCaret$SeverityBinary
+
+library(class)
+
+## best pred...
+knn.pred12=knn(train = trainFea,
+              test = testFea,
+              cl = trainOut,
+              k=12)
+```
+
+
+```{r }
+## Confusion Matrix
+table(knn.pred12,testOut)
+
+## CORRECT RATE
+mean(knn.pred12==testOut)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
